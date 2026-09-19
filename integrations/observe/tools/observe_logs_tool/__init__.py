@@ -159,7 +159,7 @@ def _call_query(
         "required": ["customer_id", "api_token", "opal"],
     },
     is_available=_observe_available,
-    injected_params=("base_url", "customer_id"),
+    injected_params=("base_url", "customer_id", "api_token"),
     extract_params=_observe_extract_params,
     evidence_mapper=_map_observe_logs,
 )
