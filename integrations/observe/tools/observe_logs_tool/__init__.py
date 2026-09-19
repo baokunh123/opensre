@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import csv
+import io
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -68,6 +70,26 @@ def _observe_extract_params(sources: dict[str, dict[str, Any]]) -> dict[str, Any
     }
 
 
+def _build_gql_query(
+    opal: str,
+    dataset: str,
+    start_time: str,
+    end_time: str,
+) -> str:
+    pipeline_escaped = opal.replace("\\", "\\\\").replace('"', '\\"')
+    if dataset:
+        input_clause = f', input: [{{inputName: "main", datasetId: "{dataset}"}}]'
+    else:
+        input_clause = ""
+    return (
+        f'{{ exportQuery('
+        f'query: {{stages: [{{id: "main", pipeline: "{pipeline_escaped}"{input_clause}}}],'
+        f' outputStage: "main"}},'
+        f' params: {{startTime: "{start_time}", endTime: "{end_time}"}}'
+        f') {{ exportUrl }} }}'
+    )
+
+
 def _call_query(
     base_url: str,
     customer_id: str,
@@ -80,23 +102,34 @@ def _call_query(
 ) -> dict[str, Any]:
     now = datetime.now(UTC)
     start = now - timedelta(minutes=max(1, time_range_minutes))
-    stage: dict[str, Any] = {"pipeline": opal}
-    if dataset:
-        stage["input"] = [{"inputName": "main", "datasetId": dataset}]
-    payload: dict[str, Any] = {
-        "stages": [stage],
-        "startTime": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "endTime": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "rowCount": limit,
-    }
-    resp = httpx.post(
-        f"{base_url.rstrip('/')}/v1/meta/export/query",
-        json=payload,
-        headers={"Authorization": f"Bearer {customer_id} {api_token}"},
+    start_time = start.strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_time = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    headers = {"Authorization": f"Bearer {customer_id} {api_token}"}
+    gql_query = _build_gql_query(opal, dataset, start_time, end_time)
+    gql_resp = httpx.post(
+        f"{base_url.rstrip('/')}/v1/meta",
+        json={"query": gql_query},
+        headers=headers,
         timeout=max(1.0, timeout_seconds),
     )
-    resp.raise_for_status()
-    return resp.json()  # type: ignore[no-any-return]
+    gql_resp.raise_for_status()
+    gql_data = gql_resp.json()
+    if "errors" in gql_data:
+        msgs = "; ".join(e.get("message", "") for e in gql_data["errors"])
+        raise ValueError(f"Observe GraphQL error: {msgs}")
+
+    export_url: str = gql_data["data"]["exportQuery"]["exportUrl"]
+    cursor_resp = httpx.get(
+        export_url,
+        headers=headers,
+        timeout=max(1.0, timeout_seconds),
+    )
+    cursor_resp.raise_for_status()
+
+    reader = csv.DictReader(io.StringIO(cursor_resp.text))
+    rows: list[dict[str, Any]] = [dict(row) for row in reader][:limit]
+    return {"rows": rows}
 
 
 @tool(
@@ -168,7 +201,7 @@ def query_observe_logs(
             tool_name="query_observe_logs",
             source="observe",
             component="integrations.observe.tools.observe_logs_tool",
-            method="httpx.post",
+            method="httpx.post/graphql",
             extras={"integration_id": integration_id},
         )
         return tool_unavailable("observe", str(err), records=[])
