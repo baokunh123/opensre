@@ -76,7 +76,9 @@ def _build_gql_query(
     start_time: str,
     end_time: str,
 ) -> str:
-    pipeline_escaped = opal.replace("\\", "\\\\").replace('"', '\\"')
+    # Flatten to single line so it embeds safely inside a GQL string literal
+    single_line = " ".join(opal.splitlines())
+    pipeline_escaped = single_line.replace("\\", "\\\\").replace('"', '\\"')
     if dataset:
         input_clause = f', input: [{{inputName: "main", datasetId: "{dataset}"}}]'
     else:
